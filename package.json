@@ -1,0 +1,14 @@
+{
+  "name": "toriel-git-mcp",
+  "version": "0.1.0",
+  "description": "MCP server exposing git as three permission-scoped tools (read/write/net) over a pinned repository. No shell, no dependencies.",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=23.6"
+  },
+  "scripts": {
+    "start": "node src/index.ts",
+    "test": "node --test test/*.test.ts"
+  }
+}
