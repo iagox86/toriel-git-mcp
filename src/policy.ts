@@ -206,6 +206,18 @@ function opensInPager(args: readonly string[]): boolean {
   return args.some((a) => /^-[^-]*O/.test(a) || a.startsWith("--open"));
 }
 
+// Two positional path-like args to `diff` make git fall into implicit
+// --no-index mode, which reads ARBITRARY FILES on the host (verified live:
+// `git -C repo diff /tmp/a /tmp/b` prints both files). Revs never look like
+// this (refs/heads/x, HEAD~1, abc123 are fine), so refusing path-shaped
+// positionals on the diff family is fail-closed and cheap. The structured
+// git_diff verb additionally always emits `--` after its revs.
+const DIFF_PATH_LIKE = /^(\/|\.\.?($|\/)|~)/;
+
+function diffPathArgs(args: readonly string[]): boolean {
+  return args.some((a) => !a.startsWith("-") && DIFF_PATH_LIKE.test(a));
+}
+
 const SCREENS: Record<string, (args: readonly string[]) => boolean> = {
   branch: (args) => !args.some((a) => BRANCH_MUTATING.has(a)),
   tag: (args) =>
@@ -223,9 +235,9 @@ const SCREENS: Record<string, (args: readonly string[]) => boolean> = {
   reflog: (args) => args[0] !== "expire" && args[0] !== "delete",
   grep: (args) => !opensInPager(args),
   log: (args) => noOutputToFile(args) && !reenablesHelpers(args),
-  diff: (args) => noOutputToFile(args) && !reenablesHelpers(args),
+  diff: (args) => noOutputToFile(args) && !reenablesHelpers(args) && !diffPathArgs(args),
   show: (args) => noOutputToFile(args) && !reenablesHelpers(args),
-  "diff-tree": (args) => noOutputToFile(args) && !reenablesHelpers(args),
+  "diff-tree": (args) => noOutputToFile(args) && !reenablesHelpers(args) && !diffPathArgs(args),
   blame: (args) => !reenablesHelpers(args),
   "merge-base": noOutputToFile,
 };

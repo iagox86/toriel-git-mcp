@@ -45,10 +45,20 @@ test("malformed json returns a parse error with null id", async () => {
 const fakeHandler: RpcHandler = createHandler("/tmp");
 const unpinHandler: RpcHandler = createHandler();
 
-test("tools/list exposes exactly the three scoped tools with annotations", async () => {
+test("tools/list exposes the three facades plus the six structured verbs", async () => {
   const response = await handleRpcMessage(rpc(3, "tools/list"), fakeHandler, SERVER_INFO);
   const tools = response?.result.tools as Array<{ name: string; annotations: Record<string, unknown> }>;
-  assert.deepEqual(tools.map((t) => t.name), ["git_read", "git_write", "git_net"]);
+  assert.deepEqual(tools.map((t) => t.name), [
+    "git_read",
+    "git_write",
+    "git_net",
+    "git_status",
+    "git_diff",
+    "git_log",
+    "git_show",
+    "git_blame",
+    "git_grep",
+  ]);
   assert.equal(tools[0].annotations.readOnlyHint, true);
   assert.equal(tools[1].annotations.destructiveHint, true);
   assert.equal(tools[2].annotations.destructiveHint, true);
