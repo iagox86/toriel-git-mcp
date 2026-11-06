@@ -138,7 +138,9 @@ export function createHandler(repo?: string): RpcHandler {
       );
     }
 
-    return runGit(repoPath, argv).then((result) => {
+    // actual === spec.gitClass past the check above; passing the class lets
+    // runGit apply read-class hardening (no-helper flags, GIT_ALLOW_PROTOCOL=file).
+    return runGit(repoPath, argv, { gitClass: actual }).then((result) => {
       const { text, isError } = formatGitResult(result);
       return { content: [{ type: "text", text }], isError };
     });
