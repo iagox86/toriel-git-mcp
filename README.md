@@ -1,15 +1,18 @@
 # toriel-git-mcp
 
-A small MCP stdio server that exposes git as exactly three permission-scoped
-tools over one pinned repository. No dependencies, no build step; runs directly
-under node 23.6+ (type stripping).
+A small MCP stdio server that exposes git as three permission-scoped
+facades plus six structured read verbs, over one pinned repository. No
+dependencies, no build step; runs directly under node 23.6+ (type stripping).
 
-The point is not git functionality - any agent can shell out to git. The point
-is that each class of git operation becomes a separately named tool, so a
+The point is not git functionality - any agent can shell out to git. The
+point is that each class of git operation becomes a separately named tool, so a
 permission layer can allow, ask, or deny per class without parsing shell
-commands.
+commands. The structured verbs go one step further: they take typed parameters
+and build their argv themselves, so user input can never become a git flag.
 
 ## Tools
+
+Three permission-scoped facades:
 
 | tool        | class | annotation          | examples                                        |
 | ----------- | ----- | ------------------- | ----------------------------------------------- |
@@ -26,6 +29,22 @@ All three take the same single argument:
 The first element must be the git subcommand (options-before-subcommand is
 rejected). Arguments go to git as argv - never through a shell.
 
+Six structured read verbs: each is `readOnly`, takes typed JSON parameters,
+builds its argv itself (structured argv - user input can never become a git
+flag), and inherits the read-class hardening (no-helper flags, fsmonitor pin,
+`GIT_ALLOW_PROTOCOL=file`, env stripping) from the shared execution path:
+
+| tool         | does                                                        | parameters                                                                     |
+| ------------ | ----------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| `git_status` | working-tree state (`--porcelain`)                           | `paths?`                                                                        |
+| `git_diff`   | diff between two revs - rev-to-rev only; use `git_status` for worktree state, since worktree-involving diffs would run clean/smudge attribute filters that git cannot disable | `from`, `to`, `paths?`                                              |
+| `git_log`    | one-line commit list                                        | `rev?` (default HEAD), `maxCount?` (default 50, clamped 1-200), `paths?`          |
+| `git_show`   | a commit's message and diff                                  | `rev`                                                                           |
+| `git_blame`  | line attribution for a tracked file                          | `path`, `rev?`                                                                  |
+| `git_grep`   | search tracked file contents (pattern travels after a literal `-e`) | `pattern`, `paths?`, `ignoreCase?`, `fixedStrings?`                  |
+
+Every tool (facades and verbs) also takes the optional `repo` argument.
+
 Class-mixed subcommands resolve by their arguments: `branch` and `tag` are
 readable in list forms but classify as write with `-D`/`-a`; `stash` reads only
 `list`/`show`; `config` reads only `--get*`/`--list`; `remote` reads only
@@ -33,7 +52,9 @@ readable in list forms but classify as write with `-D`/`-a`; `stash` reads only
 `remote.<name>.url` configured transports); `reflog expire`/`delete` and
 `--output` are writes. `verify-commit`/`verify-tag` are not permitted at all.
 tool refuses invocations that classify outside its own class and names the tool
-that owns them.
+that owns them. The verbs bypass classification entirely: their argv is built
+server-side from validated params, and the deny floor is still applied to the
+built argv as defense in depth.
 
 ## Security model
 
@@ -85,10 +106,16 @@ Defense in depth, two layers:
      running. Write and net classes are unaffected.
 
    Remaining trust boundary: `clean`/`smudge` attribute filters (for example
-   `filter.<name>.clean` in `.gitattributes`) DO run from read commands such
-   as `git diff`, and git offers no flag to disable them. The permission
-   layer's ask-gate on `git_read` is the control for that; repositories with
-   untrusted working trees should not get an unconditional `git_read` allow.
+   `filter.<name>.clean` in `.gitattributes`) DO run from read commands that
+   consult the working tree, and git offers no flag to disable them. The
+   verbs are shaped to avoid it: `git_diff` is rev-to-rev only (both sides
+   come from the object store) and `git_blame` is pinned to `HEAD` (rev-less
+   blame blames working-tree lines and runs the filter). `git_status` still
+   runs the filter for a STAT-dirty file (unchanged content, new mtime - git
+   runs clean to confirm no change; asserted in the tests so this claim
+   stays honest), and `git_show`/`git_log`/`git_grep` never touch the
+   working tree. Repositories with untrusted working trees should not get an
+   unconditional `git_read` allow.
 
 A rule misconfiguration degrades to a prompt or an error, never to a sandbox
 escape.
@@ -118,7 +145,13 @@ MCP calls resolve to targets including the bare tool name, so:
 {
   "permission": {
     "mcp": {
-      "git_read": "allow",
+      "git_status": "allow",
+      "git_diff": "allow",
+      "git_log": "allow",
+      "git_show": "allow",
+      "git_blame": "allow",
+      "git_grep": "allow",
+      "git_read": "ask",
       "git_write": "ask",
       "git_net": "deny"
     }
@@ -126,13 +159,18 @@ MCP calls resolve to targets including the bare tool name, so:
 }
 ```
 
-Reads run without friction, writes prompt, and network operations are refused
-outright. `git_net` is deny-by-default by design; enable it only deliberately.
+Grant the six structured verb tools to agents that only need to inspect the
+repository: their argv is built server-side, they inherit the read-class
+hardening, and the validator refuses dash-leading values, so they are safe to
+allow. Keep `git_read` at `ask` for full agents (the raw facade is where the
+clean/smudge residual lives); set it to `allow` only for repositories you
+trust. `git_write` prompts and `git_net` is deny-by-default by design; enable
+`git_net` only deliberately.
 
 ## Development
 
 ```sh
-npm test    # unit + stdio integration tests against a disposable fixture repo
+npm test    # unit + stdio integration tests against disposable fixture repos
 ```
 
 Run the server by hand (it speaks newline-delimited JSON-RPC on stdin):
@@ -144,6 +182,7 @@ node src/index.ts --repository ~/projects/somerepo
 ## Layout
 
 - `src/policy.ts` - classification tables, read screens, deny floor, read-argv hardening (pure, unit tested)
+- `src/verbs.ts` - structured verb tools: JSON schemas and pure argv builders (pure, unit tested)
 - `src/git.ts` - process spawn, env sanitization, no-helper flag + protocol hardening, output caps, timeout
 - `src/protocol.ts` - minimal MCP JSON-RPC over stdio
 - `src/server.ts` - tool descriptors and the tools/call handler

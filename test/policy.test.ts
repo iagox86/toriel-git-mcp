@@ -166,6 +166,17 @@ test("tag uses a positive list-mode allowlist (abbreviations defeat denylists)",
   assert.equal(classify("tag", []), "read");
 });
 
+test("the diff family refuses path-shaped positionals (implicit --no-index reads host files)", () => {
+  assert.equal(classify("diff", ["/tmp/a", "/tmp/b"]), "write");
+  assert.equal(classify("diff", ["../outside", "HEAD"]), "write");
+  assert.equal(classify("diff", [".."]), "write");
+  assert.equal(classify("diff-tree", ["/tmp/a", "/tmp/b"]), "write");
+  assert.equal(classify("diff", ["refs/heads/main", "HEAD"]), "read");
+  assert.equal(classify("diff", ["HEAD~1"]), "read");
+  assert.equal(classify("diff", ["--cached", "HEAD"]), "read");
+  assert.equal(classify("diff", ["--", "f.txt"]), "read");
+});
+
 test("hardenReadArgs leaves every other command unchanged", () => {
   for (const cmd of [
     "status",
