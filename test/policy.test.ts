@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { classify, floorViolation } from "../src/policy.ts";
+import { classify, floorViolation, hardenReadArgs } from "../src/policy.ts";
 
 test("pure read commands classify as read", () => {
   for (const cmd of ["status", "log", "diff", "show", "blame", "rev-parse", "grep"]) {
@@ -82,6 +82,130 @@ test("remote reads only listing forms", () => {
   assert.equal(classify("remote", ["add", "origin", "url"]), "write");
   assert.equal(classify("remote", ["set-url", "origin", "url"]), "write");
   assert.equal(classify("remote", ["prune", "origin"]), "write");
+});
+
+test("verify-commit and verify-tag are not permitted at all", () => {
+  // They run gpg.program, which repo-local .git/config can point anywhere.
+  assert.equal(classify("verify-commit", []), null);
+  assert.equal(classify("verify-commit", ["HEAD"]), null);
+  assert.equal(classify("verify-tag", []), null);
+  assert.equal(classify("verify-tag", ["refs/tags/v1.0"]), null);
+});
+
+test("remote show classifies as write", () => {
+  // It contacts the remote and honors remote.<name>.url transports (ext::).
+  assert.equal(classify("remote", ["show"]), "write");
+  assert.equal(classify("remote", ["show", "origin"]), "write");
+});
+
+test("hardenReadArgs puts no-helper flags before user args (a trailing `--` must not swallow them)", () => {
+  assert.deepEqual(hardenReadArgs("diff", []), ["--no-ext-diff", "--no-textconv"]);
+  assert.deepEqual(hardenReadArgs("diff", ["HEAD~1"]), ["--no-ext-diff", "--no-textconv", "HEAD~1"]);
+  assert.deepEqual(hardenReadArgs("diff", ["--", "f.txt"]), [
+    "--no-ext-diff",
+    "--no-textconv",
+    "--",
+    "f.txt",
+  ]);
+  assert.deepEqual(hardenReadArgs("diff-tree", ["HEAD~1"]), [
+    "--no-ext-diff",
+    "--no-textconv",
+    "HEAD~1",
+  ]);
+  assert.deepEqual(hardenReadArgs("log", []), [
+    "--no-ext-diff",
+    "--no-textconv",
+    "--no-show-signature",
+  ]);
+  assert.deepEqual(hardenReadArgs("log", ["--oneline", "-5"]), [
+    "--no-ext-diff",
+    "--no-textconv",
+    "--no-show-signature",
+    "--oneline",
+    "-5",
+  ]);
+  assert.deepEqual(hardenReadArgs("show", ["HEAD~1"]), [
+    "--no-ext-diff",
+    "--no-textconv",
+    "--no-show-signature",
+    "HEAD~1",
+  ]);
+  assert.deepEqual(hardenReadArgs("blame", ["f.txt"]), ["--no-ext-diff", "--no-textconv", "f.txt"]);
+});
+
+test("read screens refuse caller re-enable flags (last-flag-wins defeats injected --no-*)", () => {
+  assert.equal(classify("log", ["--show-signature"]), "write");
+  assert.equal(classify("log", ["-p", "--show-signature"]), "write");
+  assert.equal(classify("show", ["--show-signature", "HEAD"]), "write");
+  assert.equal(classify("diff", ["--ext-diff"]), "write");
+  assert.equal(classify("diff", ["--textconv"]), "write");
+  assert.equal(classify("diff-tree", ["--ext-diff", "HEAD~1", "HEAD"]), "write");
+  assert.equal(classify("blame", ["--textconv", "f.txt"]), "write");
+  assert.equal(classify("log", ["--no-show-signature"]), "read");
+});
+
+test("grep cannot open matches in a pager program (-O runs whatever it is given)", () => {
+  assert.equal(classify("grep", ["-O/tmp/evil.sh", "pattern"]), "write");
+  assert.equal(classify("grep", ["--open-files-in-pager=/tmp/evil.sh", "pattern"]), "write");
+  assert.equal(classify("grep", ["--open-files-in-pager"]), "write");
+  assert.equal(classify("grep", ["--open"]), "write", "abbreviation of --open-files-in-pager");
+  assert.equal(classify("grep", ["-nO/tmp/evil.sh", "pattern"]), "write", "bundled short: -nOcmd");
+  assert.equal(classify("grep", ["-inOcmd"]), "write", "bundled short in the middle");
+  assert.equal(classify("grep", ["-i", "pattern"]), "read");
+  assert.equal(classify("grep", ["-c", "pattern"]), "read");
+});
+
+test("tag uses a positive list-mode allowlist (abbreviations defeat denylists)", () => {
+  assert.equal(classify("tag", ["-i", "--dele", "v1"]), "write", "--dele abbreviates --delete");
+  assert.equal(classify("tag", ["-l", "v1", "-d"]), "write");
+  assert.equal(classify("tag", ["--dele", "v1"]), "write");
+  assert.equal(classify("tag", ["v1.0"]), "write", "bare tag creates");
+  assert.equal(classify("tag", ["-l", "-n5"]), "read");
+  assert.equal(classify("tag", ["-n1"]), "read");
+  assert.equal(classify("tag", ["--contains", "abc"]), "read");
+  assert.equal(classify("tag", []), "read");
+});
+
+test("hardenReadArgs leaves every other command unchanged", () => {
+  for (const cmd of [
+    "status",
+    "shortlog",
+    "describe",
+    "rev-parse",
+    "rev-list",
+    "ls-files",
+    "ls-tree",
+    "cat-file",
+    "grep",
+    "reflog",
+    "branch",
+    "tag",
+    "stash",
+    "worktree",
+    "config",
+    "remote",
+    "merge-base",
+    "for-each-ref",
+    "show-branch",
+    "count-objects",
+    "version",
+  ]) {
+    const args = ["--porcelain"];
+    assert.deepEqual(hardenReadArgs(cmd, args), args, cmd);
+  }
+  // merge-base rejects both no-helper flags (verified in test/git.test.ts).
+  assert.deepEqual(hardenReadArgs("merge-base", ["HEAD~1", "HEAD"]), ["HEAD~1", "HEAD"]);
+  assert.deepEqual(hardenReadArgs("unknown", ["x"]), ["x"]);
+});
+
+test("hardenReadArgs never mutates or aliases its input", () => {
+  const args = ["HEAD~1"];
+  const out = hardenReadArgs("diff", args);
+  assert.equal(out.length, 3);
+  assert.equal(args.length, 1);
+  assert.notEqual(out, args);
+  const unchanged = hardenReadArgs("status", args);
+  assert.notEqual(unchanged, args);
 });
 
 test("reflog expires and deletes are writes", () => {
